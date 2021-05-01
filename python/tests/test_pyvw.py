@@ -2,18 +2,14 @@ import os
 
 from vowpalwabbit import pyvw
 from vowpalwabbit.pyvw import vw
-from vowpalwabbit.pyvw import (
-    DFtoVW,
-    SimpleLabel,
-    MulticlassLabel,
-    Feature,
-    Namespace,
-)
 import pytest
-import pandas as pd
 
 BIT_SIZE = 18
 
+# Since these tests still run with Python 2, this is required.
+# Otherwise we could use math.isclose
+def isclose(a, b, rel_tol=1e-05, abs_tol=0.0):
+    return abs(a-b) <= max(rel_tol * max(abs(a), abs(b)), abs_tol)
 
 class TestVW:
 
@@ -211,28 +207,47 @@ def test_keys_with_list_of_values():
     del model
 
 
-def test_parse():
+def helper_parse(examples):
     model = vw(quiet=True, cb_adf=True)
-    ex = model.parse("| a:1 b:0.5\n0:0.1:0.75 | a:0.5 b:1 c:2")
+    ex = model.parse(examples)
     assert len(ex) == 2
+    model.learn(ex)
+    model.finish_example(ex)
+    model.finish()
 
-    ex = model.parse(
+
+def test_parse():
+    helper_parse("| a:1 b:0.5\n0:0.1:0.75 | a:0.5 b:1 c:2")
+
+    helper_parse(
         """| a:1 b:0.5
     0:0.1:0.75 | a:0.5 b:1 c:2"""
     )
-    assert len(ex) == 2
 
-    ex = model.parse(
+    helper_parse(
         """
     | a:1 b:0.5
     0:0.1:0.75 | a:0.5 b:1 c:2
     """
     )
-    assert len(ex) == 2
 
+    helper_parse(["| a:1 b:0.5", "0:0.1:0.75 | a:0.5 b:1 c:2"])
+
+
+def test_parse_2():
+    model = vw(quiet=True, cb_adf=True)
+    ex = model.parse("| a:1 b:0.5\n0:0.1:0.75 | a:0.5 b:1 c:2")
+    assert len(ex) == 2
+    model.learn(ex)
+    model.finish_example(ex)
+    model.finish()
+
+    model = vw(quiet=True, cb_adf=True)
     ex = model.parse(["| a:1 b:0.5", "0:0.1:0.75 | a:0.5 b:1 c:2"])
     assert len(ex) == 2
-    del model
+    model.learn(ex)
+    model.finish_example(ex)
+    model.finish()
 
 
 def test_learn_predict_multiline():
@@ -361,6 +376,20 @@ def test_example_features():
     ex.push_namespace(ns2)
     assert ex.pop_namespace()
 
+def test_runparser_cmd_string():
+    vw = pyvw.vw("--data ./test/train-sets/rcv1_small.dat")
+    assert vw.parser_ran == True, "vw should set parser_ran to true if --data present"
+    vw.finish()
+
+def test_runparser_cmd_string_short():
+    vw = pyvw.vw("-d ./test/train-sets/rcv1_small.dat")
+    assert vw.parser_ran == True, "vw should set parser_ran to true if --data present"
+    vw.finish()
+
+def test_not_runparser_cmd_string():
+    vw = pyvw.vw("")
+    assert vw.parser_ran == False, "vw should set parser_ran to false"
+    vw.finish()
 
 def check_error_raises(type, argument):
     """
@@ -381,158 +410,28 @@ def check_error_raises(type, argument):
     with pytest.raises(type) as error:
         argument()
 
+def test_dsjson():
+    vw = pyvw.vw('--cb_explore_adf --epsilon 0.2 --dsjson')
 
-def test_from_colnames_constructor():
-    df = pd.DataFrame({"y": [1], "x": [2]})
-    conv = DFtoVW.from_colnames(y="y", x=["x"], df=df)
-    lines_list = conv.convert_df()
-    first_line = lines_list[0]
-    assert first_line == "1 | 2"
+    ex_l_str='{"_label_cost":-1.0,"_label_probability":0.5,"_label_Action":1,"_labelIndex":0,"o":[{"v":1.0,"EventId":"38cbf24f-70b2-4c76-aa0c-970d0c8d388e","ActionTaken":false}],"Timestamp":"2020-11-15T17:09:31.8350000Z","Version":"1","EventId":"38cbf24f-70b2-4c76-aa0c-970d0c8d388e","a":[1,2],"c":{ "GUser":{"id":"person5","major":"engineering","hobby":"hiking","favorite_character":"spock"}, "_multi": [ { "TAction":{"topic":"SkiConditions-VT"} }, { "TAction":{"topic":"HerbGarden"} } ] },"p":[0.5,0.5],"VWState":{"m":"N/A"}}\n'
+    ex_l = vw.parse(ex_l_str)
+    vw.learn(ex_l)
+    pred = ex_l[0].get_action_scores()
+    expected = [0.5, 0.5]
+    assert len(pred) == len(expected)
+    for a,b in zip(pred, expected):
+        assert isclose(a, b)
+    vw.finish_example(ex_l)
 
+    ex_p='{"_label_cost":-1.0,"_label_probability":0.5,"_label_Action":1,"_labelIndex":0,"o":[{"v":1.0,"EventId":"38cbf24f-70b2-4c76-aa0c-970d0c8d388e","ActionTaken":false}],"Timestamp":"2020-11-15T17:09:31.8350000Z","Version":"1","EventId":"38cbf24f-70b2-4c76-aa0c-970d0c8d388e","a":[1,2],"c":{ "GUser":{"id":"person5","major":"engineering","hobby":"hiking","favorite_character":"spock"}, "_multi": [ { "TAction":{"topic":"SkiConditions-VT"} }, { "TAction":{"topic":"HerbGarden"} } ] },"p":[0.5,0.5],"VWState":{"m":"N/A"}}\n'
+    pred = vw.predict(ex_p)
+    expected = [0.9, 0.1]
+    assert len(pred) == len(expected)
+    for a,b in zip(pred, expected):
+        assert isclose(a, b)
 
-def test_feature_column_renaming_and_tag():
-    df = pd.DataFrame({"idx": ["id_1"], "y": [1], "x": [2]})
-    conv = DFtoVW(
-        label=SimpleLabel("y"),
-        tag="idx",
-        features=Feature(name="col_x", value="x"),
-        df=df,
-    )
-    first_line = conv.convert_df()[0]
-    assert first_line == "1 id_1| col_x:2"
-
-
-def test_constant_feature_value_with_empty_name():
-    df = pd.DataFrame({"idx": ["id_1"], "y": [1], "x": [2]})
-    conv = DFtoVW(
-        label=SimpleLabel("y"),
-        tag="idx",
-        features=Feature(name="", value=2, value_from_df=False),
-        df=df,
-    )
-    first_line = conv.convert_df()[0]
-    assert first_line == "1 id_1| :2"
-
-
-def test_variable_feature_name():
-    df = pd.DataFrame({"y": [1], "x": [2], "a": ["col_x"]})
-    conv = DFtoVW(
-        label=SimpleLabel("y"),
-        features=Feature(name="a", value="x", name_from_df=True),
-        df=df,
-    )
-    first_line = conv.convert_df()[0]
-    assert first_line == "1 | col_x:2"
-
-
-def test_multiple_lines():
-    df = pd.DataFrame({"y": [1, -1], "x": [1, 2]})
-    conv = DFtoVW(label=SimpleLabel("y"), features=Feature(value="x"), df=df,)
-    lines_list = conv.convert_df()
-    assert lines_list == ["1 | 1", "-1 | 2"]
-
-
-def test_multiple_named_namespaces():
-    df = pd.DataFrame({"y": [1], "a": [2], "b": [3]})
-    conv = DFtoVW(
-        df=df,
-        label=SimpleLabel("y"),
-        namespaces=[
-            Namespace(name="FirstNameSpace", features=Feature("a")),
-            Namespace(name="DoubleIt", value=2, features=Feature("b")),
-        ],
-    )
-    first_line = conv.convert_df()[0]
-    assert first_line == "1 |FirstNameSpace 2 |DoubleIt:2 3"
-
-
-def test_without_target_multiple_features():
-    df = pd.DataFrame({"a": [2], "b": [3]})
-    conv = DFtoVW(df=df, features=[Feature(col) for col in ["a", "b"]])
-    first_line = conv.convert_df()[0]
-    assert first_line == "| 2 3"
-
-
-def test_multiclasslabel():
-    df = pd.DataFrame({"a": [1], "b": [0.5], "c": ["x"]})
-    conv = DFtoVW(
-        df=df, label=MulticlassLabel(name="a", weight="b"), features=Feature("c")
-    )
-    first_line = conv.convert_df()[0]
-    assert first_line == "1 0.5 | x"
-
-
-def test_absent_col_error():
-    with pytest.raises(ValueError) as value_error:
-        df = pd.DataFrame({"a": [1]})
-        DFtoVW(
-            df=df,
-            label=SimpleLabel("a"),
-            features=[Feature(col) for col in ["a", "c", "d"]],
-        )
-    expected = "In 'Feature': column(s) 'c', 'd' not found in dataframe."
-    assert expected == str(value_error.value)
-
-
-def test_non_numerical_simplelabel_error():
-    df = pd.DataFrame({"y": ["a"], "x": ["featX"]})
-    with pytest.raises(TypeError) as type_error:
-        DFtoVW(df=df, label=SimpleLabel(name="y"), features=Feature("x"))
-    expected = "In argument 'name' of 'SimpleLabel', column 'y' should be either of the following type(s): 'int', 'float', 'int64'."
-    assert expected == str(type_error.value)
-
-
-def test_wrong_feature_type_error():
-    df = pd.DataFrame({"y": [1], "x": [2]})
-    with pytest.raises(TypeError) as type_error:
-        DFtoVW(df=df, label=SimpleLabel("y"), features="x")
-    expected = "Argument 'features' should be a Feature or a list of Feature."
-    assert expected == str(type_error.value)
-
-
-def test_multiclasslabel_non_positive_name_error():
-    df = pd.DataFrame({"a": [0], "b": [0.5], "c": ["x"]})
-    with pytest.raises(ValueError) as value_error:
-        DFtoVW(
-            df=df,
-            label=MulticlassLabel(name="a", weight="b"),
-            features=Feature("c"),
-        )
-    expected = "In argument 'name' of 'MulticlassLabel', column 'a' must be >= 1."
-    assert expected == str(value_error.value)
-
-
-def test_multiclasslabel_negative_weight_error():
-    df = pd.DataFrame({"y": [1], "w": [-0.5], "x": [2]})
-    with pytest.raises(ValueError) as value_error:
-        DFtoVW(
-            df=df,
-            label=MulticlassLabel(name="y", weight="w"),
-            features=Feature("x"),
-        )
-    expected = "In argument 'weight' of 'MulticlassLabel', column 'w' must be >= 0."
-    assert expected == str(value_error.value)
-
-
-def test_multiclasslabel_non_positive_constant_label_error():
-    df = pd.DataFrame({"a": [0], "b": [0.5], "c": ["x"]})
-    with pytest.raises(ValueError) as value_error:
-        DFtoVW(
-            df=df,
-            label=MulticlassLabel(name=-1, weight="b", name_from_df=False),
-            features=Feature("c"),
-        )
-    expected = "In 'MulticlassLabel', argument 'name' must be >= 1."
-    assert expected == str(value_error.value)
-
-
-def test_multiclasslabel_constant_label_type_error():
-    df = pd.DataFrame({"a": [0], "b": [0.5], "c": ["x"]})
-    with pytest.raises(TypeError) as type_error:
-        DFtoVW(
-            df=df,
-            label=MulticlassLabel(name="a", weight="b", weight_from_df=False),
-            features=Feature("c"),
-        )
-    expected = "In 'MulticlassLabel', when weight_from_df=False, argument 'weight' should be either of the following type(s): 'int', 'float'."
-    assert expected == str(type_error.value)
+def test_constructor_exception_is_safe():
+    try:
+        vw = pyvw.vw("--invalid_option")
+    except:
+        pass

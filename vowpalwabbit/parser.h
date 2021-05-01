@@ -3,22 +3,21 @@
 // license as described in the file LICENSE.
 #pragma once
 #include "io_buf.h"
-#include "parse_primitives.h"
 #include "example.h"
 #include "future_compat.h"
 
 // Mutex and CV cannot be used in managed C++, tell the compiler that this is unmanaged even if included in a managed
 // project.
 #ifdef _M_CEE
-#pragma managed(push, off)
-#undef _M_CEE
-#include <mutex>
-#include <condition_variable>
-#define _M_CEE 001
-#pragma managed(pop)
+#  pragma managed(push, off)
+#  undef _M_CEE
+#  include <mutex>
+#  include <condition_variable>
+#  define _M_CEE 001
+#  pragma managed(pop)
 #else
-#include <mutex>
-#include <condition_variable>
+#  include <mutex>
+#  include <condition_variable>
 #endif
 
 #include <atomic>
@@ -26,6 +25,8 @@
 #include "vw_string_view.h"
 #include "queue.h"
 #include "object_pool.h"
+#include "hashstring.h"
+#include "simple_label_parser.h"
 
 struct vw;
 struct input_options;
@@ -40,24 +41,12 @@ struct parser
       , finished_examples(0)
       , strict_parse{strict_parse_}
   {
-    this->input = new io_buf{};
-    this->output = new io_buf{};
-    this->lp = simple_label;
-
-    // Free parser must still be used for the following fields.
-    this->ids = v_init<size_t>();
-    this->counts = v_init<size_t>();
+    this->input = VW::make_unique<io_buf>();
+    this->output = VW::make_unique<io_buf>();
+    this->lbl_parser = simple_label_parser;
   }
 
-  ~parser()
-  {
-    delete input;
-    delete output;
-    ids.delete_v();
-    counts.delete_v();
-  }
-
-  //delete copy constructor
+  // delete copy constructor
   parser(const parser&) = delete;
   parser& operator=(const parser&) = delete;
 
@@ -67,17 +56,17 @@ struct parser
   VW::object_pool<example> example_pool;
   VW::ptr_queue<example> ready_parsed_examples;
 
-  io_buf* input = nullptr;  // Input source(s)
+  std::unique_ptr<io_buf> input;  // Input source(s)
   /// reader consumes the input io_buf in the vw object and is generally for file based parsing
   int (*reader)(vw*, v_array<example*>& examples);
   /// text_reader consumes the char* input and is for text based parsing
-  void (*text_reader)(vw*, char*, size_t, v_array<example*>&);
+  void (*text_reader)(vw*, const char*, size_t, v_array<example*>&);
 
   shared_data* _shared_data = nullptr;
 
   hash_func_t hasher;
   bool resettable;           // Whether or not the input can be reset.
-  io_buf* output = nullptr;  // Where to output the cache.
+  std::unique_ptr<io_buf> output;  // Where to output the cache.
   std::string currentname;
   std::string finalname;
 
@@ -87,7 +76,7 @@ struct parser
 
   const size_t ring_size;
   std::atomic<uint64_t> begin_parsed_examples;  // The index of the beginning parsed example.
-  std::atomic<uint64_t> end_parsed_examples;      // The index of the fully parsed example.
+  std::atomic<uint64_t> end_parsed_examples;    // The index of the fully parsed example.
   std::atomic<uint64_t> finished_examples;      // The count of finished examples.
   uint32_t in_pass_counter = 0;
   bool emptylines_separate_examples = false;  // true if you want to have holdout computed on a per-block basis rather
@@ -105,7 +94,7 @@ struct parser
 
   std::vector<VW::string_view> parse_name;
 
-  label_parser lp;  // moved from vw
+  label_parser lbl_parser;  // moved from vw
 
   bool audit = false;
   bool decision_service_json = false;

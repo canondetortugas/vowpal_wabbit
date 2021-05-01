@@ -12,9 +12,12 @@
 using namespace VW::LEARNER;
 using namespace VW::config;
 
+// TODO: This file makes extensive use of cout and partial line logging.
+//       Will require some investigation on how to proceed
+
 class node_pred
 {
- public:
+public:
   double Ehk;
   float norm_Ehk;
   uint32_t nk;
@@ -23,15 +26,9 @@ class node_pred
 
   bool operator==(node_pred v) const { return (label == v.label); }
 
-  bool operator>(node_pred v) const
-  {
-    return label > v.label;
-  }
+  bool operator>(node_pred v) const { return label > v.label; }
 
-  bool operator<(node_pred v) const
-  {
-    return label < v.label;
-  }
+  bool operator<(node_pred v) const { return label < v.label; }
 
   node_pred() = default;
   node_pred(uint32_t l)
@@ -73,7 +70,7 @@ struct log_multi
 {
   uint32_t k;
 
-  v_array<node> nodes;
+  std::vector<node> nodes;
 
   size_t max_predictors;
   size_t predictors_used;
@@ -86,8 +83,6 @@ struct log_multi
   ~log_multi()
   {
     // save_node_stats(b);
-    for (auto& node : nodes) node.preds.delete_v();
-    nodes.delete_v();
   }
 };
 
@@ -156,6 +151,8 @@ inline void update_min_count(log_multi& b, uint32_t node)
 
 void display_tree_dfs(log_multi& b, const node& node, uint32_t depth)
 {
+  // TODO: its likely possible to replicate this output with the logger, but will
+  //       require some research
   for (uint32_t i = 0; i < depth; i++) std::cout << "\t";
   std::cout << node.min_count << " " << node.left << " " << node.right;
   std::cout << " label = " << node.max_count_label << " labels = ";
@@ -269,6 +266,7 @@ void train_node(
       (float)b.nodes[current].preds[class_index].Ehk / b.nodes[current].preds[class_index].nk;
 }
 
+// TODO: currently unused. Is this useful to keep around?
 void verify_min_dfs(log_multi& b, const node& node)
 {
   if (node.internal)
@@ -303,7 +301,9 @@ void predict(log_multi& b, single_learner& base, example& ec)
 {
   MULTICLASS::label_t mc = ec.l.multi;
 
-  ec.l.simple = {FLT_MAX, 0.f, 0.f};
+  ec.l.simple = {FLT_MAX};
+  ec._reduction_features.template get<simple_label_reduction_features>().reset_to_default();
+
   uint32_t cn = 0;
   uint32_t depth = 0;
   while (b.nodes[cn].internal)
@@ -318,17 +318,14 @@ void predict(log_multi& b, single_learner& base, example& ec)
 
 void learn(log_multi& b, single_learner& base, example& ec)
 {
-  //    verify_min_dfs(b, b.nodes[0]);
-  if (ec.l.multi.label == (uint32_t)-1 || b.progress)
-    predict(b, base, ec);
-
   if (ec.l.multi.label != (uint32_t)-1)  // if training the tree
   {
     MULTICLASS::label_t mc = ec.l.multi;
     uint32_t start_pred = ec.pred.multiclass;
 
     uint32_t class_index = 0;
-    ec.l.simple = {FLT_MAX, 0.f, 0.f};
+    ec.l.simple = {FLT_MAX};
+    ec._reduction_features.template get<simple_label_reduction_features>().reset_to_default();
     uint32_t cn = 0;
     uint32_t depth = 0;
     while (children(b, cn, class_index, mc.label))
@@ -360,17 +357,12 @@ void save_node_stats(log_multi& d)
         b->nodes[i].Eh / b->nodes[i].n, b->nodes[i].n);
 
     fprintf(fp, "Label:, ");
-    for (j = 0; j < b->nodes[i].preds.size(); j++)
-    {
-      fprintf(fp, "%6d,", (int)b->nodes[i].preds[j].label);
-    }
+    for (j = 0; j < b->nodes[i].preds.size(); j++) { fprintf(fp, "%6d,", (int)b->nodes[i].preds[j].label); }
     fprintf(fp, "\n");
 
     fprintf(fp, "Ehk:, ");
     for (j = 0; j < b->nodes[i].preds.size(); j++)
-    {
-      fprintf(fp, "%7.4f,", b->nodes[i].preds[j].Ehk / b->nodes[i].preds[j].nk);
-    }
+    { fprintf(fp, "%7.4f,", b->nodes[i].preds[j].Ehk / b->nodes[i].preds[j].nk); }
     fprintf(fp, "\n");
 
     total = 0;
@@ -495,29 +487,26 @@ base_learner* log_multi_setup(options_i& options, vw& all)  // learner setup
 {
   auto data = scoped_calloc_or_throw<log_multi>();
   option_group_definition new_options("Logarithmic Time Multiclass Tree");
-  new_options.add(make_option("log_multi", data->k).keep().help("Use online tree for multiclass"))
+  new_options.add(make_option("log_multi", data->k).keep().necessary().help("Use online tree for multiclass"))
       .add(make_option("no_progress", data->progress).help("disable progressive validation"))
-      .add(make_option("swap_resistance", data->swap_resist).default_value(4).help("disable progressive validation"))
       .add(make_option("swap_resistance", data->swap_resist)
                .default_value(4)
                .help("higher = more resistance to swap, default=4"));
-  options.add_and_parse(new_options);
 
-  if (!options.was_supplied("log_multi"))
-    return nullptr;
+  if (!options.add_parse_and_check_necessary(new_options)) return nullptr;
 
   data->progress = !data->progress;
 
   std::string loss_function = "quantile";
   float loss_parameter = 0.5;
-  delete (all.loss);
   all.loss = getLossFunction(all, loss_function, loss_parameter);
 
   data->max_predictors = data->k - 1;
   init_tree(*data.get());
 
-  learner<log_multi, example>& l = init_multiclass_learner(
-      data, as_singleline(setup_base(options, all)), learn, predict, all.p, data->max_predictors);
+  learner<log_multi, example>& l = init_multiclass_learner(data, as_singleline(setup_base(options, all)), learn,
+      predict, all.example_parser, data->max_predictors, all.get_setupfn_name(log_multi_setup));
+  all.example_parser->lbl_parser.label_type = label_type_t::multiclass;
   l.set_save_load(save_load_tree);
 
   return make_base(l);
