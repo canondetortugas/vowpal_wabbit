@@ -43,6 +43,7 @@ private:
 
   // Parameters and data structures for RegCB action set computation
   bool _elim;
+  bool _fast;
   float _c0;
   float _min_cb_cost;
   float _max_cb_cost;
@@ -56,7 +57,7 @@ private:
 
 public:
   cb_explore_adf_squarecb(
-      float gamma_scale, float gamma_exponent, bool elim, float c0, float min_cb_cost, float max_cb_cost);
+			  float gamma_scale, float gamma_exponent, bool elim, bool fast, float c0, float min_cb_cost, float max_cb_cost);
   ~cb_explore_adf_squarecb() = default;
 
   // Should be called through cb_explore_adf_base for pre/post-processing
@@ -72,11 +73,12 @@ private:
 };
 
 cb_explore_adf_squarecb::cb_explore_adf_squarecb(
-    float gamma_scale, float gamma_exponent, bool elim, float c0, float min_cb_cost, float max_cb_cost)
+						 float gamma_scale, float gamma_exponent, bool elim, bool fast, float c0, float min_cb_cost, float max_cb_cost)
     : _counter(0)
     , _gamma_scale(gamma_scale)
     , _gamma_exponent(gamma_exponent)
     , _elim(elim)
+    , _fast(fast)
     , _c0(c0)
     , _min_cb_cost(min_cb_cost)
     , _max_cb_cost(max_cb_cost)
@@ -217,6 +219,9 @@ void cb_explore_adf_squarecb::predict_or_learn_impl(VW::LEARNER::multi_learner& 
     {
       size_t a_min = 0;
       float min_cost = preds[0].score;
+
+      if (_fast && min_cost < 0) THROW("error: squarecb with --fast argument requires non-negative costs.");
+
       // Compute highest-scoring action
       for (size_t a = 0; a < num_actions; ++a)
       {
@@ -232,7 +237,14 @@ void cb_explore_adf_squarecb::predict_or_learn_impl(VW::LEARNER::multi_learner& 
       for (size_t a = 0; a < num_actions; ++a)
       {
         if (a == a_min) continue;
-        pa = 1.f / (num_actions + gamma * (preds[a].score - min_cost));
+	if (_fast)
+	  {
+	    pa = min_cost / ((num_actions * min_cost) + gamma * (preds[a].score - min_cost));
+	  }
+	else
+	  {
+	    pa = 1.f / (num_actions + gamma * (preds[a].score - min_cost));
+	  }
         preds[a].score = pa;
         total_weight += pa;
       }
@@ -268,7 +280,14 @@ void cb_explore_adf_squarecb::predict_or_learn_impl(VW::LEARNER::multi_learner& 
         else
         {
           if (a == a_min) continue;
-          pa = 1.f / (num_surviving_actions + gamma * (preds[a].score - min_cost));
+	  if (_fast)
+	    {
+	      pa = min_cost / ((num_surviving_actions * min_cost) + gamma * (preds[a].score - min_cost));
+	    }
+	  else
+	    {
+	      pa = 1.f / (num_surviving_actions + gamma * (preds[a].score - min_cost));
+	    }
           preds[a].score = pa;
           total_weight += pa;
         }
@@ -291,6 +310,8 @@ VW::LEARNER::base_learner* setup(VW::config::options_i& options, vw& all)
 
   // Perform SquareCB exploration over RegCB-style disagreement sets
   bool elim = false;
+  // Enables a reweighted version of SquareCB ("FastCB") that enjoys faster convergence when the optimal loss is small (requires non-negative losses).
+  bool fast = false;
   float c0 = 0.;
   float min_cb_cost = 0.;
   float max_cb_cost = 0.;
@@ -312,6 +333,9 @@ VW::LEARNER::base_learner* setup(VW::config::options_i& options, vw& all)
       .add(make_option("elim", elim)
                .keep()
                .help("Only perform SquareCB exploration over plausible actions (computed via RegCB strategy)"))
+      .add(make_option("fast", fast)
+               .keep()
+               .help("Exploit more aggressively for faster convergence when optimal loss is small (requires non-negative losses)"))
       .add(make_option("mellowness", c0)
                .keep()
                .default_value(0.001f)
@@ -345,7 +369,7 @@ VW::LEARNER::base_learner* setup(VW::config::options_i& options, vw& all)
   all.example_parser->lbl_parser = CB::cb_label;
 
   using explore_type = cb_explore_adf_base<cb_explore_adf_squarecb>;
-  auto data = scoped_calloc_or_throw<explore_type>(gamma_scale, gamma_exponent, elim, c0, min_cb_cost, max_cb_cost);
+  auto data = scoped_calloc_or_throw<explore_type>(gamma_scale, gamma_exponent, elim, fast, c0, min_cb_cost, max_cb_cost);
   VW::LEARNER::learner<explore_type, multi_ex>& l =
       VW::LEARNER::init_learner(data, base, explore_type::learn, explore_type::predict, problem_multiplier,
           prediction_type_t::action_probs, all.get_setupfn_name(setup) + "-squarecb");
