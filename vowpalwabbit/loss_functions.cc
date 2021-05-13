@@ -161,34 +161,43 @@ class logloss : public loss_function
 public:
   std::string getType() { return "logistic"; }
 
+  // DF: Note (5/7/21): This is a hack to make this work with 0/1 multiclass labels without doing global cost/loss remapping.
+  float remapLabelZeroOne(float label)
+  {
+    if (label == 0.f)
+      return -1.f;
+    else
+      return label;
+  }
+
   float getLoss(shared_data*, float prediction, float label)
   {
     // TODO: warning or error?
-    if (label != -1.f && label != 1.f)
-      logger::log_warn("You are using label {} not -1 or 1 as loss function expects!", label);
-    return log(1 + correctedExp(-label * prediction));
+    if (remapLabelZeroOne(label) != -1.f && remapLabelZeroOne(label) != 1.f)
+      logger::log_warn("You are using label {} not -1 or 1 as loss function expects!", remapLabelZeroOne(label));
+    return log(1 + correctedExp(-remapLabelZeroOne(label) * prediction));
   }
 
   float getUpdate(float prediction, float label, float update_scale, float pred_per_update)
   {
     float w, x;
-    float d = correctedExp(label * prediction);
+    float d = correctedExp(remapLabelZeroOne(label) * prediction);
     if (update_scale * pred_per_update < 1e-6)
     {
       /* As with squared loss, for small eta_t we replace the update
        * with its first order Taylor expansion to avoid numerical problems
        */
-      return label * update_scale / (1 + d);
+      return remapLabelZeroOne(label) * update_scale / (1 + d);
     }
-    x = update_scale * pred_per_update + label * prediction + d;
+    x = update_scale * pred_per_update + remapLabelZeroOne(label) * prediction + d;
     w = wexpmx(x);
-    return -(label * w + prediction) / pred_per_update;
+    return -(remapLabelZeroOne(label) * w + prediction) / pred_per_update;
   }
 
   float getUnsafeUpdate(float prediction, float label, float update_scale)
   {
-    float d = correctedExp(label * prediction);
-    return label * update_scale / (1 + d);
+    float d = correctedExp(remapLabelZeroOne(label) * prediction);
+    return remapLabelZeroOne(label) * update_scale / (1 + d);
   }
 
   inline float wexpmx(float x)
@@ -213,19 +222,19 @@ public:
 
   float first_derivative(shared_data*, float prediction, float label)
   {
-    float v = -label / (1 + correctedExp(label * prediction));
+    float v = -remapLabelZeroOne(label) / (1 + correctedExp(remapLabelZeroOne(label) * prediction));
     return v;
   }
 
   float getSquareGrad(float prediction, float label)
   {
-    float d = first_derivative(nullptr, prediction, label);
+    float d = first_derivative(nullptr, prediction, remapLabelZeroOne(label));
     return d * d;
   }
 
   float second_derivative(shared_data*, float prediction, float label)
   {
-    float p = 1 / (1 + correctedExp(label * prediction));
+    float p = 1 / (1 + correctedExp(remapLabelZeroOne(label) * prediction));
 
     return p * (1 - p);
   }

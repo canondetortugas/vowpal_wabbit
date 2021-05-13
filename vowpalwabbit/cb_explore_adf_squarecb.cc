@@ -16,6 +16,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cfloat>
+// For sigmoid
+#include "correctedMath.h"
+
+// Debugging
+#include <iostream>
+
+// Lhat-based tuning
+#include "cb_adf.h"
+#include "cb.h" 
 
 /*
 This file implements the SquareCB algorithm/reduction (Foster and Rakhlin (2020), https://arxiv.org/abs/2002.04926),
@@ -33,17 +42,26 @@ namespace cb_explore_adf
 {
 namespace squarecb
 {
+
+float sigmoid_link(float score)
+{
+  return 1.f / (1 + correctedExp(-1. * score));
+}
+
 struct cb_explore_adf_squarecb
 {
 private:
   // size_t _counter;
   size_t _counter;
+  float _cumulative_cost;
   float _gamma_scale;     // Scale factor for SquareCB reediness parameter $\gamma$.
   float _gamma_exponent;  // Exponent on $t$ for SquareCB reediness parameter $\gamma$.
 
   // Parameters and data structures for RegCB action set computation
   bool _elim;
   bool _fast;
+  bool _sigmoid;
+  bool _tune_gamma;
   float _c0;
   float _min_cb_cost;
   float _max_cb_cost;
@@ -56,8 +74,7 @@ private:
   std::vector<v_array<CB::cb_class>> _ex_costs;
 
 public:
-  cb_explore_adf_squarecb(
-			  float gamma_scale, float gamma_exponent, bool elim, bool fast, float c0, float min_cb_cost, float max_cb_cost);
+  cb_explore_adf_squarecb(float gamma_scale, float gamma_exponent, bool elim, bool fast, bool tune_gamma, bool sigmoid, float c0, float min_cb_cost, float max_cb_cost);
   ~cb_explore_adf_squarecb() = default;
 
   // Should be called through cb_explore_adf_base for pre/post-processing
@@ -72,13 +89,15 @@ private:
   float binary_search(float fhat, float delta, float sens, float tol = 1e-6);
 };
 
-cb_explore_adf_squarecb::cb_explore_adf_squarecb(
-						 float gamma_scale, float gamma_exponent, bool elim, bool fast, float c0, float min_cb_cost, float max_cb_cost)
+cb_explore_adf_squarecb::cb_explore_adf_squarecb(float gamma_scale, float gamma_exponent, bool elim, bool fast, bool tune_gamma, bool sigmoid, float c0, float min_cb_cost, float max_cb_cost)
     : _counter(0)
+    , _cumulative_cost(1.f)
     , _gamma_scale(gamma_scale)
     , _gamma_exponent(gamma_exponent)
     , _elim(elim)
     , _fast(fast)
+    , _tune_gamma(tune_gamma)
+    , _sigmoid(sigmoid)
     , _c0(c0)
     , _min_cb_cost(min_cb_cost)
     , _max_cb_cost(max_cb_cost)
@@ -197,6 +216,16 @@ void cb_explore_adf_squarecb::predict_or_learn_impl(VW::LEARNER::multi_learner& 
 
     VW::LEARNER::multiline_learn_or_predict<true>(base, examples, examples[0]->ft_offset);
     ++_counter;
+
+  if (_tune_gamma)
+    {
+      // Get the cost of the example we encountered.
+      CB::cb_class observed_class = CB_ADF::get_observed_cost_or_default_cb_adf(examples);
+      if (observed_class.cost == FLT_MAX) THROW("error: squarecb with --tune_gamma encountered unobserved cost on example " << _counter << ".");
+      // std::cout << "Observed cost " << observed_class.cost << std::endl;
+      _cumulative_cost += observed_class.cost;
+    }
+    
   }
   else
     VW::LEARNER::multiline_learn_or_predict<false>(base, examples, examples[0]->ft_offset);
@@ -205,7 +234,12 @@ void cb_explore_adf_squarecb::predict_or_learn_impl(VW::LEARNER::multi_learner& 
   uint32_t num_actions = (uint32_t)preds.size();
 
   // The actual parameter $\gamma$ used in the SquareCB.
-  const float gamma = _gamma_scale * static_cast<float>(std::pow(_counter, _gamma_exponent));
+  float gamma;
+  if (_tune_gamma)
+    gamma = _gamma_scale * static_cast<float>(std::pow(_cumulative_cost, _gamma_exponent));
+  else
+    gamma = _gamma_scale * static_cast<float>(std::pow(_counter, _gamma_exponent));
+  // const float gamma = _gamma_scale * static_cast<float>(std::pow(_counter, _gamma_exponent));
 
   // RegCB action set parameters
   const float max_range = _max_cb_cost - _min_cb_cost;
@@ -218,19 +252,34 @@ void cb_explore_adf_squarecb::predict_or_learn_impl(VW::LEARNER::multi_learner& 
     if (!_elim)  // Vanilla variant (perform SquareCB exploration over all actions)
     {
       size_t a_min = 0;
+
+      // Note: This should be fine, since we store the final probabilities in preds anyway.
+      if (_sigmoid)
+	{
+	  for (size_t a = 0; a < num_actions; ++a)
+	    {
+	      preds[a].score = sigmoid_link(preds[a].score);
+	    }
+	}
+
       float min_cost = preds[0].score;
-
-      if (_fast && min_cost < 0) THROW("error: squarecb with --fast argument requires non-negative costs.");
-
+      
       // Compute highest-scoring action
+      // std::cout << "Scores: ";
       for (size_t a = 0; a < num_actions; ++a)
       {
+	// std::cout << preds[a].score << ", ";
         if (preds[a].score < min_cost)
         {
           a_min = a;
           min_cost = preds[a].score;
         }
       }
+      // std::cout << std::endl;
+
+      if (_fast && min_cost < 0) THROW("error: squarecb with --fast argument requires non-negative scores. Encountered score " << min_cost << " on example " << _counter << ".");
+      // if (_fast && min_cost <= 0) THROW("error: squarecb with --fast argument requires positive scores. Encountered score " << min_cost << " on example " << _counter << ".");
+      
       // Compute probabilities using SquareCB rule.
       float total_weight = 0;
       float pa = 0;
@@ -312,6 +361,8 @@ VW::LEARNER::base_learner* setup(VW::config::options_i& options, vw& all)
   bool elim = false;
   // Enables a reweighted version of SquareCB ("FastCB") that enjoys faster convergence when the optimal loss is small (requires non-negative losses).
   bool fast = false;
+  bool tune_gamma = false;
+  bool sigmoid = false;
   float c0 = 0.;
   float min_cb_cost = 0.;
   float max_cb_cost = 0.;
@@ -326,16 +377,22 @@ VW::LEARNER::base_learner* setup(VW::config::options_i& options, vw& all)
       .add(make_option("gamma_scale", gamma_scale)
                .keep()
                .default_value(10.f)
-               .help("Sets SquareCB greediness parameter to gamma=[gamma_scale]*[num examples]^1/2"))
+               .help("Sets SquareCB greediness parameter to gamma=[gamma_scale]*[num examples]^[gamma_exponent]"))
       .add(make_option("gamma_exponent", gamma_exponent)
                .default_value(.5f)
                .help("Exponent on [num examples] in SquareCB greediness parameter gamma."))
       .add(make_option("elim", elim)
                .keep()
                .help("Only perform SquareCB exploration over plausible actions (computed via RegCB strategy)"))
-      .add(make_option("fast", fast)
+    .add(make_option("fast", fast)
                .keep()
                .help("Exploit more aggressively for faster convergence when optimal loss is small (requires non-negative losses)"))
+    .add(make_option("tune_gamma", tune_gamma)
+               .keep()
+               .help("Automatically tune gamma based on the observed loss."))
+      .add(make_option("sigmoid", sigmoid)
+	       .keep()
+               .help("Apply sigmoid activation to scores from oracle before applying SquareCB algorithm."))
       .add(make_option("mellowness", c0)
                .keep()
                .default_value(0.001f)
@@ -369,7 +426,7 @@ VW::LEARNER::base_learner* setup(VW::config::options_i& options, vw& all)
   all.example_parser->lbl_parser = CB::cb_label;
 
   using explore_type = cb_explore_adf_base<cb_explore_adf_squarecb>;
-  auto data = scoped_calloc_or_throw<explore_type>(gamma_scale, gamma_exponent, elim, fast, c0, min_cb_cost, max_cb_cost);
+  auto data = scoped_calloc_or_throw<explore_type>(gamma_scale, gamma_exponent, elim, fast, tune_gamma, sigmoid, c0, min_cb_cost, max_cb_cost);
   VW::LEARNER::learner<explore_type, multi_ex>& l =
       VW::LEARNER::init_learner(data, base, explore_type::learn, explore_type::predict, problem_multiplier,
           prediction_type_t::action_probs, all.get_setupfn_name(setup) + "-squarecb");
