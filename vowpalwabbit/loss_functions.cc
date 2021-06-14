@@ -443,11 +443,11 @@ public:
     return (float)(w * (1. + r / t * (u - r) / (u - 2. * r)) - x);  // more magic
   }
 
-  // float getRevertingWeight(shared_data*, float prediction, float eta_t)
-  // {
-  //   float z = -fabs(prediction);
-  //   return (1 - z - correctedExp(z)) / eta_t;
-  // }
+  float getRevertingWeight(shared_data*, float prediction, float eta_t)
+  {
+    assert(false);
+    return 0;
+  }
 
   float first_derivative(shared_data*, float prediction, float label)
   {
@@ -462,12 +462,11 @@ public:
     return d * d;
   }
 
-  // float second_derivative(shared_data*, float prediction, float label)
-  // {
-  //   float p = 1 / (1 + correctedExp(label * prediction));
-
-  //   return p * (1 - p);
-  // }
+  float second_derivative(shared_data*, float prediction, float label)
+  {
+    assert(false);
+    return 0;
+  }
 };
 
 std::unique_ptr<loss_function> getLossFunction(vw& all, const std::string& funcName, float function_parameter)
