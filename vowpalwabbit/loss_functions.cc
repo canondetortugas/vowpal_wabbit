@@ -369,6 +369,107 @@ public:
   }
 };
 
+/*
+ * Implements GLMTron algorithm.
+ * Assumes labels in {0,1}
+ *
+ */
+class glmtron : public loss_function
+{
+public:
+  std::string getType() { return "glmtron"; }
+
+  // float remapLabelZeroOne(float label)
+  // {
+  //   if (label == 0.f)
+  //     return -1.f;
+  //   else
+  //     return label;
+  // }
+
+  float _sigmoid(float val)
+  {
+    return 1/(1 + correctedExp(-val));
+  }
+
+  float getLoss(shared_data*, float prediction, float label)
+  {
+    // TODO: warning or error?
+    if (label != 0.f && label != 1.f)
+      logger::log_warn("You are using label {} not 0 or 1 as glmtron loss function expects!", label);
+    return (label - _sigmoid(prediction)) * (label - _sigmoid(prediction));
+    // return log(1 + correctedExp(-label * prediction));
+  }
+
+  float getUpdate(float prediction, float label, float update_scale, float /* pred_per_update */)
+  {
+    // float w, x;
+    // float d = correctedExp(label * prediction);
+    // if (update_scale * pred_per_update < 1e-6)
+    // {
+    //   /* As with squared loss, for small eta_t we replace the update
+    //    * with its first order Taylor expansion to avoid numerical problems
+    //    */
+    //   return label * update_scale / (1 + d);
+    // }
+    // x = update_scale * pred_per_update + label * prediction + d;
+    // w = wexpmx(x);
+    // return -(label * w + prediction) / pred_per_update;
+
+    return getUnsafeUpdate(prediction, label, update_scale);
+  }
+
+  float getUnsafeUpdate(float prediction, float label, float update_scale)
+  {
+    // float d = correctedExp(label * prediction);
+    // return label * update_scale / (1 + d);
+    
+    float glm_prediction = _sigmoid(prediction);
+    
+    return -2.f * (glm_prediction - label) * update_scale;
+  }
+
+  inline float wexpmx(float x)
+  {
+    /* This piece of code is approximating W(exp(x))-x.
+     * W is the Lambert W function: W(z)*exp(W(z))=z.
+     * The absolute error of this approximation is less than 9e-5.
+     * Faster/better approximations can be substituted here.
+     */
+    double w = x >= 1. ? 0.86 * x + 0.01 : correctedExp(0.8 * x - 0.65);  // initial guess
+    double r = x >= 1. ? x - log(w) - w : 0.2 * x + 0.65 - w;             // residual
+    double t = 1. + w;
+    double u = 2. * t * (t + 2. * r / 3.);                          // magic
+    return (float)(w * (1. + r / t * (u - r) / (u - 2. * r)) - x);  // more magic
+  }
+
+  // float getRevertingWeight(shared_data*, float prediction, float eta_t)
+  // {
+  //   float z = -fabs(prediction);
+  //   return (1 - z - correctedExp(z)) / eta_t;
+  // }
+
+  float first_derivative(shared_data*, float prediction, float label)
+  {
+    float glm_prediction = _sigmoid(prediction);
+    
+    return 2.f * (glm_prediction - label);
+  }
+
+  float getSquareGrad(float prediction, float label)
+  {
+    float d = first_derivative(nullptr, prediction, label);
+    return d * d;
+  }
+
+  // float second_derivative(shared_data*, float prediction, float label)
+  // {
+  //   float p = 1 / (1 + correctedExp(label * prediction));
+
+  //   return p * (1 - p);
+  // }
+};
+
 std::unique_ptr<loss_function> getLossFunction(vw& all, const std::string& funcName, float function_parameter)
 {
   if (funcName == "squared" || funcName == "Huber") { return VW::make_unique<squaredloss>(); }
@@ -388,6 +489,15 @@ std::unique_ptr<loss_function> getLossFunction(vw& all, const std::string& funcN
       all.sd->max_label = 50;
     }
     return VW::make_unique<logloss>();
+  }
+  else if (funcName == "glmtron")
+  {
+    if (all.set_minmax != noop_mm)
+    {
+      all.sd->min_label = -50;
+      all.sd->max_label = 50;
+    }
+    return VW::make_unique<glmtron>();
   }
   else if (funcName == "quantile" || funcName == "pinball" || funcName == "absolute")
   {
